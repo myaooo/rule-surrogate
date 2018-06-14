@@ -1,0 +1,176 @@
+import dill as pickle
+from typing import Optional, Union
+
+from sklearn.base import ClassifierMixin, RegressorMixin
+from sklearn.metrics import log_loss, accuracy_score, mean_squared_error, r2_score
+
+from rule_surrogate import Config
+from rule_surrogate.utils.io_utils import get_path, obj2pkl, assert_file_exists
+from rule_surrogate.core.metrics import auc_score
+
+FILE_EXTENSION = '.mdl'
+
+CLASSIFICATION = 'classification'
+REGRESSION = 'regression'
+
+
+def _format_name(name):
+    return get_path(Config.model_dir(), "{}{}".format(name, FILE_EXTENSION))
+
+
+class ModelInterface:
+    def predict(self, x):
+        raise NotImplementedError("Interface class")
+
+
+class ModelBase(ModelInterface):
+    def __init__(self, name):
+        self.name = name
+
+    @property
+    def type(self):
+        raise NotImplementedError("Base class")
+
+    def train(self, x, y, **kwargs):
+        raise NotImplementedError("Base class")
+
+    def test(self, x, y):
+        """
+
+        :param x:
+        :param y:
+        :return: accuracy
+        """
+        # raise NotImplementedError("Base class")
+        return self.evaluate(x, y, stage='test')
+
+    def evaluate(self, x, y, stage='train'):
+        raise NotImplementedError("Base class")
+
+    # def predict_prob(self, x):
+    #     raise NotImplementedError("Base class")
+
+    def predict(self, x):
+        raise NotImplementedError("Base class")
+
+    def score(self, y_true, y_pred):
+        raise NotImplementedError("Base class")
+
+    def save(self, filename=None):
+        if filename is None:
+            filename = _format_name(self.name)
+        obj2pkl(self, filename)
+
+    @classmethod
+    def load(cls, filename):
+        mdl = load_model(filename)
+        if isinstance(mdl, cls):
+            return mdl
+        else:
+            raise RuntimeError("The loaded file is not a Tree model!")
+
+
+def load_model(filename: str) -> ModelBase:
+    assert_file_exists(filename)
+    with open(filename, "rb") as f:
+        mdl = pickle.load(f)
+        # assert isinstance(mdl, ModelBase)
+        return mdl
+
+
+class SKModelWrapper(ModelBase):
+    """A wrapper that wraps models in Sklearn"""
+    def __init__(self, problem=CLASSIFICATION, name='wrapper'):
+        super(SKModelWrapper, self).__init__(name=name)
+        self._problem = problem
+        self._model = None  # type: Optional[Union[RegressorMixin, ClassifierMixin]]
+
+    @property
+    def type(self):
+        return "sk-model-wrapper"
+
+    @property
+    def model(self):
+        return self._model
+        # raise NotImplementedError("This is the SKModelWrapper base class!")
+
+    def train(self, x, y, **kwargs):
+        self.model.fit(x, y)
+        # self.evaluate(x, y, stage='train')
+
+    def predict_prob(self, x):
+        assert self._problem == CLASSIFICATION
+        return self.model.predict_proba(x)
+
+    def predict(self, x):
+        return self.model.predict(x)
+
+    # def score(self, y_true, y_pred):
+    #     raise NotImplementedError("This is the SKModelWrapper base class!")
+
+
+class Classifier(ModelBase):
+
+    @property
+    def type(self):
+        return 'classifier'
+
+    # def train(self, x, y):
+    #     raise NotImplementedError("This is the classifier base class")
+
+    def evaluate(self, x, y, stage='train'):
+        acc = self.accuracy(y, self.predict(x))
+        loss = self.log_loss(y, self.predict_prob(x))
+        auc = auc_score(y, self.predict_prob(x), average='macro')
+        prefix = 'Training'
+        if stage == 'test':
+            prefix = 'Testing'
+        print(prefix + " accuracy: {:.5f}; loss: {:.5f}; auc: {:.5f}".format(acc, loss, auc))
+        return acc, loss, auc
+
+    def predict_prob(self, x):
+        raise NotImplementedError("This is the classifier base class!")
+
+    def score(self, y_true, y_pred):
+        return self.accuracy(y_true, y_pred)
+
+    @staticmethod
+    def log_loss(y_true, y_prob):
+        # print(y_true.max())
+        return log_loss(y_true, y_prob, labels=list(range(y_prob.shape[1])))
+
+    @staticmethod
+    def accuracy(y_true, y_pred):
+        return accuracy_score(y_true, y_pred)
+
+
+class Regressor(ModelBase):
+
+    @property
+    def type(self):
+        return 'regressor'
+
+    def evaluate(self, x, y, stage='train'):
+        """
+
+        :param x:
+        :param y:
+        :return: accuracy
+        """
+        s = self.mse(y, self.predict(x))
+        prefix = 'Training'
+        if stage == 'test':
+            prefix = 'Testing'
+        print(prefix + " mse: {:.5f}".format(s))
+        return s
+
+    def score(self, y_true, y_pred):
+        return self.mse(y_true, y_pred)
+
+    @staticmethod
+    def mse(y_true, y_pred):
+        return mean_squared_error(y_true, y_pred)
+
+    @staticmethod
+    def r2(y_true, y_pred):
+        return r2_score(y_true, y_pred)
